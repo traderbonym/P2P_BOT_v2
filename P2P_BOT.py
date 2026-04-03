@@ -24,7 +24,7 @@ dp = Dispatcher(storage=storage)
 # Глобальна сесія aiohttp
 session = None
 
-# Історія розрахунків (зберігається в пам'яті)
+# Історія розрахунків
 user_history = {}
 
 
@@ -41,7 +41,7 @@ async def get_binance_rates():
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         
-        # КУПІВЛЯ USDT - беремо НИЗЬКУ ЦІНУ (трейдери ПРОДАЮТЬ нам)
+        # КУПІВЛЯ USDT - вкладка "Купить" (ми купуємо = tradeType: BUY)
         # https://p2p.binance.com/trade/all-payments/USDT?fiat=UAH
         buy_payload = {
             "asset": "USDT",
@@ -49,7 +49,7 @@ async def get_binance_rates():
             "merchantCheck": True,
             "page": 1,
             "rows": 10,
-            "tradeType": "SELL",  # Хто ПРОДАЄ USDT (ми купуємо)
+            "tradeType": "BUY",  # МИ купуємо USDT
             "transAmount": "5000",
             "payTypes": ["Monobank"]
         }
@@ -61,7 +61,7 @@ async def get_binance_rates():
             # 2-й рядок (індекс 1) - НИЗЬКА ЦІНА
             buy_rate = float(buy_data["data"][1]["adv"]["price"])
         
-        # ПРОДАЖ USDT - беремо ВИСОКУ ЦІНУ (трейдери КУПУЮТЬ у нас)
+        # ПРОДАЖ USDT - вкладка "Продать" (ми продаємо = tradeType: SELL)
         # https://p2p.binance.com/trade/sell/USDT?fiat=UAH&payment=all-payments
         sell_payload = {
             "asset": "USDT",
@@ -69,7 +69,7 @@ async def get_binance_rates():
             "merchantCheck": True,
             "page": 1,
             "rows": 10,
-            "tradeType": "BUY",  # Хто КУПУЄ USDT (ми продаємо)
+            "tradeType": "SELL",  # МИ продаємо USDT
             "transAmount": "5000",
             "payTypes": ["Monobank"]
         }
@@ -96,10 +96,10 @@ async def get_binance_rates():
 
 def calculate_arbitrage(amount, buy_rate, sell_rate):
     """Розрахунок P2P арбітражу"""
-    # 1. Скільки USDT купимо за amount грн (по НИЗЬКІЙ ціні)
+    # 1. Скільки USDT купимо
     usdt_bought = amount / buy_rate
     
-    # 2. Скільки грн отримаємо при продажу (по ВИСОКІЙ ціні)
+    # 2. Скільки грн отримаємо при продажу
     uah_received = usdt_bought * sell_rate
     
     # 3. Прибуток
@@ -124,8 +124,8 @@ def format_result(amount, rates, calc):
 💰 <b>P2P Арбітраж (Monobank)</b>
 
 📊 <b>Курси Binance P2P (2-й рядок):</b>
-• 🛒 Купівля USDT: <b>{rates['buy_rate']:.2f}</b> грн (низька ціна)
-• 💸 Продаж USDT: <b>{rates['sell_rate']:.2f}</b> грн (висока ціна)
+• 🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн
+• 💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн
 
 💵 <b>Ваша сума:</b> {amount:,.0f} грн
 
@@ -153,7 +153,6 @@ def add_to_history(user_id, amount, profit, percent):
         "time": datetime.now().strftime("%H:%M:%S")
     })
     
-    # Зберігаємо тільки останні 5 записів
     if len(user_history[user_id]) > 5:
         user_history[user_id].pop(0)
 
@@ -178,7 +177,8 @@ def main_kb():
     """Головна клавіатура"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Розрахувати", callback_data="calculate")],
-        [InlineKeyboardButton(text="📊 Binance P2P", url="https://p2p.binance.com/trade/all-payments/USDT?fiat=UAH")],
+        [InlineKeyboardButton(text="📊 Купити USDT", url="https://p2p.binance.com/trade/all-payments/USDT?fiat=UAH")],
+        [InlineKeyboardButton(text="💸 Продати USDT", url="https://p2p.binance.com/trade/sell/USDT?fiat=UAH&payment=all-payments")],
         [InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/P2P_CEH")],
         [InlineKeyboardButton(text="📜 Історія", callback_data="history")],
         [InlineKeyboardButton(text="ℹ️ Інфо", callback_data="info")]
@@ -201,8 +201,8 @@ async def cmd_start(message: Message):
         f"👋 Вітаю, <b>{message.from_user.first_name}</b>!\n\n"
         "🤖 Я бот для розрахунку <b>P2P арбітражу</b> на Binance.\n\n"
         "💰 <b>Принцип роботи:</b>\n"
-        "• Купуємо USDT по низькій ціні\n"
-        "• Продаємо USDT по високій ціні\n"
+        "• Купуємо USDT по низькій ціні (вкладка Купить)\n"
+        "• Продаємо USDT по високій ціні (вкладка Продать)\n"
         "• Отримуємо прибуток!\n\n"
         "💡 Натисніть кнопку для розрахунку:",
         reply_markup=main_kb()
@@ -327,18 +327,15 @@ async def refresh_rates(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Помилка: дані втрачено")
             return
         
-        # Отримуємо нові курси
         rates = await get_binance_rates()
         
         if not rates["success"]:
             await callback.answer(f"❌ Помилка: {rates['error']}")
             return
         
-        # Розрахунок
         calc = calculate_arbitrage(amount, rates["buy_rate"], rates["sell_rate"])
         text = format_result(amount, rates, calc)
         
-        # Оновлюємо повідомлення
         await callback.message.edit_text(text, reply_markup=action_kb())
         await callback.answer("✅ Курси оновлено!")
         
@@ -371,25 +368,20 @@ async def process_amount(message: Message, state: FSMContext):
         if amount < 5000:
             return await message.answer("❌ Мінімальна сума: <b>5000 грн</b>")
         
-        # Отримуємо курси
         rates = await get_binance_rates()
         
         if not rates["success"]:
             return await message.answer(f"❌ Помилка: {rates['error']}")
         
-        # Розрахунок
         calc = calculate_arbitrage(amount, rates["buy_rate"], rates["sell_rate"])
         
-        # Додаємо в історію
         add_to_history(message.from_user.id, amount, calc["profit"], calc["percent"])
         
-        # Відправляємо результат
         await message.answer(
             format_result(amount, rates, calc),
             reply_markup=action_kb()
         )
         
-        # Зберігаємо дані для refresh
         await state.update_data(amount=amount)
         await state.clear()
         
@@ -412,11 +404,9 @@ if __name__ == "__main__":
         """Головна функція з HTTP-сервером"""
         global session
         
-        # Ініціалізація сесії
         timeout = aiohttp.ClientTimeout(total=10)
         session = aiohttp.ClientSession(timeout=timeout)
         
-        # HTTP-сервер для Render
         app = web.Application()
         app.router.add_get("/", health_check)
         app.router.add_get("/health", health_check)
@@ -430,7 +420,6 @@ if __name__ == "__main__":
         
         logger.info(f"🌐 HTTP-сервер запущено на порту {port}")
         
-        # Запуск бота
         logger.info("🤖 P2P Арбітраж Бот запущений!")
         me = await bot.get_me()
         logger.info(f"🔗 @{me.username}")
@@ -441,5 +430,4 @@ if __name__ == "__main__":
             await session.close()
             logger.info("🛑 Сесія закрита")
     
-    # Запуск
     asyncio.run(main())
