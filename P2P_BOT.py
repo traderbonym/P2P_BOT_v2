@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Ініціалізація бота (ТОКЕН З ENVIRONMENT VARIABLES!)
-bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
+bot = Bot(token=os.getenv("TELEGRAM_TOKEN"), parse_mode="HTML")
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -41,14 +41,14 @@ async def get_binance_rates():
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         
-        # Курс купівлі (buy USDT за UAH)
+        # Курс купівлі USDT (ми купуємо = продавці продають)
         buy_payload = {
             "asset": "USDT",
             "fiat": "UAH",
             "merchantCheck": True,
             "page": 1,
-            "rows": 10,
-            "tradeType": "BUY",
+            "rows": 1,
+            "tradeType": "SELL",  # Продавці ПРОДАЮТЬ нам USDT
             "transAmount": "5000"
         }
         
@@ -56,14 +56,14 @@ async def get_binance_rates():
             buy_data = await response.json()
             buy_rate = float(buy_data["data"][0]["adv"]["price"])
         
-        # Курс продажу (sell USDT за UAH)
+        # Курс продажу USDT (ми продаємо = покупці купують)
         sell_payload = {
             "asset": "USDT",
             "fiat": "UAH",
             "merchantCheck": True,
             "page": 1,
-            "rows": 10,
-            "tradeType": "SELL",
+            "rows": 1,
+            "tradeType": "BUY",  # Покупці КУПУЮТЬ у нас USDT
             "transAmount": "5000"
         }
         
@@ -73,8 +73,8 @@ async def get_binance_rates():
         
         return {
             "success": True,
-            "buy_rate": buy_rate,
-            "sell_rate": sell_rate
+            "buy_rate": buy_rate,  # За скільки МИ купуємо USDT
+            "sell_rate": sell_rate  # За скільки МИ продаємо USDT
         }
         
     except Exception as e:
@@ -84,16 +84,41 @@ async def get_binance_rates():
 
 # ========== РОЗРАХУНКИ ==========
 
-def calculate(amount, buy_rate, sell_rate):
-    """Розрахунок арбітражу"""
-    usdt_amount = amount / buy_rate
-    uah_received = usdt_amount * sell_rate
+def calculate_buy(amount, buy_rate, sell_rate):
+    """Розрахунок для КУПІВЛІ USDT"""
+    # Скільки USDT купимо
+    usdt_bought = amount / buy_rate
+    
+    # Скільки грн отримаємо при продажі
+    uah_received = usdt_bought * sell_rate
+    
+    # Прибуток
     profit = uah_received - amount
     profit_percent = (profit / amount) * 100
     
     return {
-        "usdt": round(usdt_amount, 2),
+        "usdt": round(usdt_bought, 2),
         "received": round(uah_received, 2),
+        "profit": round(profit, 2),
+        "percent": round(profit_percent, 2)
+    }
+
+
+def calculate_sell(amount, buy_rate, sell_rate):
+    """Розрахунок для ПРОДАЖУ USDT"""
+    # Скільки USDT потрібно продати щоб отримати amount грн
+    usdt_to_sell = amount / sell_rate
+    
+    # Скільки грн витратимо на купівлю цих USDT
+    uah_spent = usdt_to_sell * buy_rate
+    
+    # Прибуток
+    profit = amount - uah_spent
+    profit_percent = (profit / uah_spent) * 100 if uah_spent > 0 else 0
+    
+    return {
+        "usdt": round(usdt_to_sell, 2),
+        "spent": round(uah_spent, 2),
         "profit": round(profit, 2),
         "percent": round(profit_percent, 2)
     }
@@ -101,23 +126,49 @@ def calculate(amount, buy_rate, sell_rate):
 
 # ========== ФОРМАТУВАННЯ ==========
 
-def format_result(amount, rates, calc):
-    """Форматування результату"""
+def format_buy_result(amount, rates, calc):
+    """Форматування результату КУПІВЛІ"""
+    profit_emoji = "🟢" if calc["profit"] > 0 else "🔴"
+    
     return f"""
-💰 <b>Розрахунок P2P арбітражу</b>
+💰 <b>Купівля USDT → Продаж USDT</b>
 
-📊 <b>Курси Binance:</b>
-• Купівля: {rates['buy_rate']:.2f} грн
-• Продаж: {rates['sell_rate']:.2f} грн
+📊 <b>Курси Binance P2P:</b>
+• 🛒 Купівля USDT: <b>{rates['buy_rate']:.2f}</b> грн
+• 💸 Продаж USDT: <b>{rates['sell_rate']:.2f}</b> грн
 
 💵 <b>Ваша сума:</b> {amount:,.0f} грн
 
-📈 <b>Результат:</b>
-• USDT: {calc['usdt']} USDT
-• Отримаєте: {calc['received']:,.2f} грн
-• Прибуток: {calc['profit']:,.2f} грн ({calc['percent']:.2f}%)
+📈 <b>Розрахунок:</b>
+1️⃣ Купуєте <b>{calc['usdt']}</b> USDT за {amount:,.0f} грн
+2️⃣ Продаєте <b>{calc['usdt']}</b> USDT за {calc['received']:,.2f} грн
 
-🕒 {datetime.now().strftime("%H:%M:%S")}
+{profit_emoji} <b>Прибуток:</b> {calc['profit']:,.2f} грн ({calc['percent']:.2f}%)
+
+🕐 Оновлено: {datetime.now().strftime("%H:%M:%S")}
+"""
+
+
+def format_sell_result(amount, rates, calc):
+    """Форматування результату ПРОДАЖУ"""
+    profit_emoji = "🟢" if calc["profit"] > 0 else "🔴"
+    
+    return f"""
+💸 <b>Купівля USDT → Продаж USDT</b>
+
+📊 <b>Курси Binance P2P:</b>
+• 🛒 Купівля USDT: <b>{rates['buy_rate']:.2f}</b> грн
+• 💸 Продаж USDT: <b>{rates['sell_rate']:.2f}</b> грн
+
+💵 <b>Бажана сума:</b> {amount:,.0f} грн
+
+📈 <b>Розрахунок:</b>
+1️⃣ Купуєте <b>{calc['usdt']}</b> USDT за {calc['spent']:,.2f} грн
+2️⃣ Продаєте <b>{calc['usdt']}</b> USDT за {amount:,.0f} грн
+
+{profit_emoji} <b>Прибуток:</b> {calc['profit']:,.2f} грн ({calc['percent']:.2f}%)
+
+🕐 Оновлено: {datetime.now().strftime("%H:%M:%S")}
 """
 
 
@@ -126,8 +177,9 @@ def format_result(amount, rates, calc):
 def main_kb():
     """Головна клавіатура"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Купити USDT", callback_data="buy")],
-        [InlineKeyboardButton(text="💸 Продати USDT", callback_data="sell")]
+        [InlineKeyboardButton(text="🛒 Купити USDT", callback_data="buy")],
+        [InlineKeyboardButton(text="💸 Продати USDT", callback_data="sell")],
+        [InlineKeyboardButton(text="ℹ️ Інфо", callback_data="info")]
     ])
 
 def action_kb():
@@ -145,11 +197,47 @@ async def cmd_start(message: Message):
     """Обробник команди /start"""
     await message.answer(
         f"👋 Вітаю, <b>{message.from_user.first_name}</b>!\n\n"
-        "🤖 Я бот для розрахунку P2P арбітражу на Binance.\n\n"
+        "🤖 Я бот для розрахунку <b>P2P арбітражу</b> на Binance.\n\n"
         "💡 Оберіть дію:",
         reply_markup=main_kb()
     )
-    logger.info(f"👤 Новий користувач: {message.from_user.id} (@{message.from_user.username})")
+    logger.info(f"👤 User {message.from_user.id} (@{message.from_user.username})")
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Обробник команди /help"""
+    await message.answer(
+        "📚 <b>Довідка:</b>\n\n"
+        "🛒 <b>Купити USDT</b> - розрахунок прибутку при купівлі USDT за гривні та подальшому продажу\n\n"
+        "💸 <b>Продати USDT</b> - розрахунок скільки потрібно USDT для отримання бажаної суми\n\n"
+        "🔄 <b>Оновити курси</b> - отримати актуальні курси Binance P2P\n\n"
+        "⚡️ <b>Курси оновлюються в реальному часі з Binance P2P</b>\n\n"
+        "❓ Питання: @your_support",
+        reply_markup=main_kb()
+    )
+
+
+@dp.message(Command("info"))
+async def cmd_info(message: Message):
+    """Обробник команди /info"""
+    rates = await get_binance_rates()
+    
+    if rates["success"]:
+        spread = rates["sell_rate"] - rates["buy_rate"]
+        spread_percent = (spread / rates["buy_rate"]) * 100
+        
+        await message.answer(
+            "ℹ️ <b>Інформація про курси:</b>\n\n"
+            f"🛒 Купівля USDT: <b>{rates['buy_rate']:.2f}</b> грн\n"
+            f"💸 Продаж USDT: <b>{rates['sell_rate']:.2f}</b> грн\n\n"
+            f"📊 Спред: <b>{spread:.2f}</b> грн ({spread_percent:.2f}%)\n\n"
+            f"🕐 Оновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
+            "⚡️ Дані з Binance P2P в реальному часі",
+            reply_markup=main_kb()
+        )
+    else:
+        await message.answer(f"❌ Помилка отримання курсів: {rates['error']}")
 
 
 # ========== ОБРОБНИКИ CALLBACK ==========
@@ -157,8 +245,11 @@ async def cmd_start(message: Message):
 @dp.callback_query(F.data == "buy")
 async def process_buy(callback: CallbackQuery, state: FSMContext):
     """Обробник кнопки 'Купити USDT'"""
-    await callback.message.answer("💰 Введіть суму в <b>гривнях</b>, яку хочете витратити:\n\n"
-                                    "Приклад: <code>5000</code>")
+    await callback.message.answer(
+        "🛒 <b>Купівля USDT</b>\n\n"
+        "Введіть суму в <b>гривнях</b>, яку хочете витратити на купівлю USDT:\n\n"
+        "💡 Приклад: <code>5000</code>"
+    )
     await state.set_state(BuyState.waiting_for_amount)
     await callback.answer()
 
@@ -166,9 +257,36 @@ async def process_buy(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "sell")
 async def process_sell(callback: CallbackQuery, state: FSMContext):
     """Обробник кнопки 'Продати USDT'"""
-    await callback.message.answer("💸 Введіть суму в <b>гривнях</b>, яку хочете отримати:\n\n"
-                                    "Приклад: <code>5000</code>")
+    await callback.message.answer(
+        "💸 <b>Продаж USDT</b>\n\n"
+        "Введіть суму в <b>гривнях</b>, яку хочете отримати після продажу USDT:\n\n"
+        "💡 Приклад: <code>5000</code>"
+    )
     await state.set_state(SellState.waiting_for_amount)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "info")
+async def process_info(callback: CallbackQuery):
+    """Обробник кнопки 'Інфо'"""
+    rates = await get_binance_rates()
+    
+    if rates["success"]:
+        spread = rates["sell_rate"] - rates["buy_rate"]
+        spread_percent = (spread / rates["buy_rate"]) * 100
+        
+        await callback.message.answer(
+            "ℹ️ <b>Інформація про курси:</b>\n\n"
+            f"🛒 Купівля USDT: <b>{rates['buy_rate']:.2f}</b> грн\n"
+            f"💸 Продаж USDT: <b>{rates['sell_rate']:.2f}</b> грн\n\n"
+            f"📊 Спред: <b>{spread:.2f}</b> грн ({spread_percent:.2f}%)\n\n"
+            f"🕐 Оновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
+            "⚡️ Дані з Binance P2P в реальному часі",
+            reply_markup=main_kb()
+        )
+    else:
+        await callback.message.answer(f"❌ Помилка: {rates['error']}")
+    
     await callback.answer()
 
 
@@ -176,27 +294,34 @@ async def process_sell(callback: CallbackQuery, state: FSMContext):
 async def refresh_rates(callback: CallbackQuery, state: FSMContext):
     """Оновлення курсів"""
     try:
-        # Отримуємо збережену суму
         data = await state.get_data()
-        amount = data.get("amount", 5000)
+        amount = data.get("amount")
+        operation = data.get("operation")  # "buy" або "sell"
+        
+        if not amount or not operation:
+            await callback.answer("❌ Помилка: дані втрачено")
+            return
         
         # Отримуємо нові курси
         rates = await get_binance_rates()
         
         if not rates["success"]:
-            return await callback.message.answer(f"❌ Помилка: {rates['error']}")
+            await callback.answer(f"❌ Помилка: {rates['error']}")
+            return
         
-        # Розрахунок
-        calc = calculate(amount, rates["buy_rate"], rates["sell_rate"])
+        # Розрахунок залежно від операції
+        if operation == "buy":
+            calc = calculate_buy(amount, rates["buy_rate"], rates["sell_rate"])
+            text = format_buy_result(amount, rates, calc)
+        else:
+            calc = calculate_sell(amount, rates["buy_rate"], rates["sell_rate"])
+            text = format_sell_result(amount, rates, calc)
         
         # Оновлюємо повідомлення
-        await callback.message.edit_text(
-            format_result(amount, rates, calc),
-            reply_markup=action_kb()
-        )
+        await callback.message.edit_text(text, reply_markup=action_kb())
+        await callback.answer("✅ Курси оновлено!")
         
         logger.info(f"🔄 User {callback.from_user.id} оновив курси")
-        await callback.answer("✅ Курси оновлено!")
         
     except Exception as e:
         logger.error(f"Помилка в refresh: {e}")
@@ -204,8 +329,9 @@ async def refresh_rates(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.callback_query(F.data == "new")
-async def new_calculation(callback: CallbackQuery):
+async def new_calculation(callback: CallbackQuery, state: FSMContext):
     """Новий розрахунок"""
+    await state.clear()
     await callback.message.answer(
         "💡 Оберіть дію:",
         reply_markup=main_kb()
@@ -224,8 +350,8 @@ async def process_buy_amount(message: Message, state: FSMContext):
         if amount <= 0:
             return await message.answer("❌ Сума має бути більше 0!")
         
-        # Зберігаємо суму
-        await state.update_data(amount=amount)
+        # Зберігаємо суму та операцію
+        await state.update_data(amount=amount, operation="buy")
         await state.clear()
         
         # Отримуємо курси
@@ -235,18 +361,21 @@ async def process_buy_amount(message: Message, state: FSMContext):
             return await message.answer(f"❌ Помилка: {rates['error']}")
         
         # Розрахунок
-        calc = calculate(amount, rates["buy_rate"], rates["sell_rate"])
+        calc = calculate_buy(amount, rates["buy_rate"], rates["sell_rate"])
         
         # Відправляємо результат
         await message.answer(
-            format_result(amount, rates, calc),
+            format_buy_result(amount, rates, calc),
             reply_markup=action_kb()
         )
         
-        logger.info(f"💰 User {message.from_user.id}: {amount} грн")
+        # Зберігаємо дані для refresh
+        await state.update_data(amount=amount, operation="buy")
+        
+        logger.info(f"🛒 User {message.from_user.id}: купівля {amount} грн")
         
     except ValueError:
-        await message.answer("❌ Введіть коректну суму!\n\nПриклад: <code>5000</code>")
+        await message.answer("❌ Введіть коректну суму!\n\n💡 Приклад: <code>5000</code>")
 
 
 @dp.message(SellState.waiting_for_amount)
@@ -258,8 +387,8 @@ async def process_sell_amount(message: Message, state: FSMContext):
         if amount <= 0:
             return await message.answer("❌ Сума має бути більше 0!")
         
-        # Зберігаємо суму
-        await state.update_data(amount=amount)
+        # Зберігаємо суму та операцію
+        await state.update_data(amount=amount, operation="sell")
         await state.clear()
         
         # Отримуємо курси
@@ -268,19 +397,22 @@ async def process_sell_amount(message: Message, state: FSMContext):
         if not rates["success"]:
             return await message.answer(f"❌ Помилка: {rates['error']}")
         
-        # Розрахунок (для продажу використовуємо інвертовані курси)
-        calc = calculate(amount, rates["sell_rate"], rates["buy_rate"])
+        # Розрахунок
+        calc = calculate_sell(amount, rates["buy_rate"], rates["sell_rate"])
         
         # Відправляємо результат
         await message.answer(
-            format_result(amount, rates, calc),
+            format_sell_result(amount, rates, calc),
             reply_markup=action_kb()
         )
         
-        logger.info(f"💸 User {message.from_user.id}: {amount} грн")
+        # Зберігаємо дані для refresh
+        await state.update_data(amount=amount, operation="sell")
+        
+        logger.info(f"💸 User {message.from_user.id}: продаж для {amount} грн")
         
     except ValueError:
-        await message.answer("❌ Введіть коректну суму!\n\nПриклад: <code>5000</code>")
+        await message.answer("❌ Введіть коректну суму!\n\n💡 Приклад: <code>5000</code>")
 
 
 # ========== ЗАПУСК БОТА ==========
