@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -28,66 +28,72 @@ dp = Dispatcher(storage=storage)
 session = None
 user_history = {}
 
+# Київський час (UTC+2)
+KYIV_TZ = timezone(timedelta(hours=2))
+
+def get_kyiv_time():
+    """Повертає поточний час у Києві"""
+    return datetime.now(KYIV_TZ).strftime("%H:%M:%S")
+
 # FSM States
 class CalculateState(StatesGroup):
     waiting_for_amount = State()
 
-# Get Binance P2P rates with filter >= 5000 UAH
+# Get Binance P2P rates (ALL BANKS, >= 5000 UAH)
 async def get_binance_rates():
-    """Отримання курсів з Binance P2P (2-й рядок, Monobank, від 5000 грн)"""
+    """Отримання курсів Binance P2P (всі банки, 2-й рядок, від 5000 грн)"""
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         
-        # КУПІВЛЯ USDT
+        # КУПІВЛЯ USDT (ми купуємо = низька ціна)
         buy_payload = {
             "fiat": "UAH",
             "page": 1,
-            "rows": 20,  # Більше для фільтрації
+            "rows": 20,
             "tradeType": "BUY",
             "asset": "USDT",
-            "payTypes": ["Monobank"],
             "publisherType": "merchant"
+            # БЕЗ payTypes - всі банки!
         }
         
         async with session.post(url, json=buy_payload) as response:
             buy_data = await response.json()
             if not buy_data.get("data"):
-                return {"success": False, "error": "No buy offers"}
+                return {"success": False, "error": "Немає оголошень купівлі"}
             
-            # ФІЛЬТРУЄМО: мінімальна сума >= 5000 грн
+            # Фільтр: мінімум <= 5000 <= максимум
             buy_filtered = []
             for ad in buy_data["data"]:
                 min_amount = float(ad["adv"]["minSingleTransAmount"])
                 max_amount = float(ad["adv"]["maxSingleTransAmount"])
                 
-                # Перевірка: мінімум <= 5000 <= максимум
                 if min_amount <= 5000 <= max_amount:
                     buy_filtered.append(ad)
             
             if len(buy_filtered) < 2:
-                return {"success": False, "error": "Not enough buy offers with 5000+ UAH"}
+                return {"success": False, "error": "Недостатньо оголошень купівлі (5000+ грн)"}
             
-            # Беремо 2-й рядок (індекс 1)
+            # 2-й рядок
             buy_rate = float(buy_filtered[1]["adv"]["price"])
-            logger.info(f"Buy: {buy_rate} UAH (min: {buy_filtered[1]['adv']['minSingleTransAmount']} UAH)")
+            buy_bank = buy_filtered[1]["adv"]["tradeMethods"][0]["tradeMethodName"] if buy_filtered[1]["adv"]["tradeMethods"] else "N/A"
+            logger.info(f"Buy: {buy_rate} UAH (bank: {buy_bank}, min: {buy_filtered[1]['adv']['minSingleTransAmount']} UAH)")
         
-        # ПРОДАЖ USDT
+        # ПРОДАЖ USDT (ми продаємо = висока ціна)
         sell_payload = {
             "fiat": "UAH",
             "page": 1,
             "rows": 20,
             "tradeType": "SELL",
             "asset": "USDT",
-            "payTypes": ["Monobank"],
             "publisherType": "merchant"
         }
         
         async with session.post(url, json=sell_payload) as response:
             sell_data = await response.json()
             if not sell_data.get("data"):
-                return {"success": False, "error": "No sell offers"}
+                return {"success": False, "error": "Немає оголошень продажу"}
             
-            # ФІЛЬТРУЄМО: мінімальна сума >= 5000 грн
+            # Фільтр
             sell_filtered = []
             for ad in sell_data["data"]:
                 min_amount = float(ad["adv"]["minSingleTransAmount"])
@@ -97,28 +103,37 @@ async def get_binance_rates():
                     sell_filtered.append(ad)
             
             if len(sell_filtered) < 2:
-                return {"success": False, "error": "Not enough sell offers with 5000+ UAH"}
+                return {"success": False, "error": "Недостатньо оголошень продажу (5000+ грн)"}
             
-            # Беремо 2-й рядок
+            # 2-й рядок
             sell_rate = float(sell_filtered[1]["adv"]["price"])
-            logger.info(f"Sell: {sell_rate} UAH (min: {sell_filtered[1]['adv']['minSingleTransAmount']} UAH)")
+            sell_bank = sell_filtered[1]["adv"]["tradeMethods"][0]["tradeMethodName"] if sell_filtered[1]["adv"]["tradeMethods"] else "N/A"
+            logger.info(f"Sell: {sell_rate} UAH (bank: {sell_bank}, min: {sell_filtered[1]['adv']['minSingleTransAmount']} UAH)")
         
         logger.info(f"Rates: Buy={buy_rate}, Sell={sell_rate}")
         
         return {
             "success": True,
             "buy_rate": buy_rate,
-            "sell_rate": sell_rate
+            "sell_rate": sell_rate,
+            "buy_bank": buy_bank,
+            "sell_bank": sell_bank
         }
         
     except Exception as e:
         logger.error(f"Error: {e}")
         return {"success": False, "error": str(e)}
 
-# Calculate arbitrage
+# Calculate arbitrage (ПРАВИЛЬНА ФОРМУЛА!)
 def calculate_arbitrage(amount, buy_rate, sell_rate):
+    """Розрахунок арбітражу: прибуток = продаж - купівля"""
+    # 1. Купуємо USDT
     usdt_bought = amount / buy_rate
+    
+    # 2. Продаємо USDT
     uah_received = usdt_bought * sell_rate
+    
+    # 3. ПРАВИЛЬНА ФОРМУЛА: продаж - купівля
     profit = uah_received - amount
     profit_percent = (profit / amount) * 100
     
@@ -134,9 +149,9 @@ def format_result(amount, rates, calc):
     profit_emoji = "🟢" if calc["profit"] > 0 else "🔴"
     
     return f"""
-📊 <b>Курси Binance P2P (2-й рядок):</b>
-• 🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн
-• 💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн
+📊 <b>Курси Binance P2P (2-й рядок, всі банки):</b>
+• 🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн ({rates.get('buy_bank', 'N/A')})
+• 💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн ({rates.get('sell_bank', 'N/A')})
 
 💰 <b>Ваша сума:</b> {amount:,.0f} грн
 
@@ -146,7 +161,7 @@ def format_result(amount, rates, calc):
 
 {profit_emoji} <b>Прибуток:</b> {calc['profit']:,.2f} грн (<b>{calc['percent']:.2f}%</b>)
 
-🕐 {datetime.now().strftime("%H:%M:%S")}
+🕐 {get_kyiv_time()}
 """
 
 # History
@@ -158,7 +173,7 @@ def add_to_history(user_id, amount, profit, percent):
         "amount": amount,
         "profit": profit,
         "percent": percent,
-        "time": datetime.now().strftime("%H:%M:%S")
+        "time": get_kyiv_time()
     })
     
     if len(user_history[user_id]) > 5:
@@ -240,7 +255,7 @@ async def cmd_help(message: Message):
         "1️⃣ Оберіть біржу (Binance P2P)\n"
         "2️⃣ Введіть суму (мін. 5000 грн)\n"
         "3️⃣ Отримайте розрахунок прибутку\n\n"
-        "🏦 Фільтри: Monobank, від 5000 грн (2-й рядок)\n\n"
+        "🏦 Фільтри: всі банки, від 5000 грн (2-й рядок)\n\n"
         "📊 Команди:\n"
         "/start - головне меню\n"
         "/info - інформація про курси\n"
@@ -259,11 +274,11 @@ async def cmd_info(message: Message):
         spread_percent = (spread / rates["buy_rate"]) * 100
         
         await message.answer(
-            f"ℹ️ <b>Binance P2P (Monobank, 2-й рядок):</b>\n\n"
-            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн\n"
-            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн\n\n"
+            f"ℹ️ <b>Binance P2P (всі банки, 2-й рядок):</b>\n\n"
+            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн ({rates.get('buy_bank', 'N/A')})\n"
+            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн ({rates.get('sell_bank', 'N/A')})\n\n"
             f"📊 Спред: <b>{spread:.2f}</b> грн (<b>{spread_percent:.2f}%</b>)\n\n"
-            f"🕐 {datetime.now().strftime('%H:%M:%S')}\n\n"
+            f"🕐 {get_kyiv_time()}\n\n"
             "💬 @K2P_S",
             reply_markup=main_menu_keyboard()
         )
@@ -287,7 +302,7 @@ async def menu_binance(message: Message):
         "🔵 <b>Binance P2P Арбітраж</b>\n\n"
         "💰 Розраховуйте прибуток від купівлі та продажу USDT\n\n"
         "📊 Курси оновлюються в реальному часі\n"
-        "🏦 Фільтр: Monobank, від 5000 грн (2-й рядок)",
+        "🏦 Всі банки, від 5000 грн (2-й рядок)",
         reply_markup=binance_menu_kb()
     )
 
@@ -300,11 +315,11 @@ async def menu_info(message: Message):
         spread_percent = (spread / rates["buy_rate"]) * 100
         
         await message.answer(
-            f"ℹ️ <b>Binance P2P (Monobank, 2-й рядок):</b>\n\n"
-            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн\n"
-            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн\n\n"
+            f"ℹ️ <b>Binance P2P (всі банки, 2-й рядок):</b>\n\n"
+            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн ({rates.get('buy_bank', 'N/A')})\n"
+            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн ({rates.get('sell_bank', 'N/A')})\n\n"
             f"📊 Спред: <b>{spread:.2f}</b> грн (<b>{spread_percent:.2f}%</b>)\n\n"
-            f"🕐 {datetime.now().strftime('%H:%M:%S')}\n\n"
+            f"🕐 {get_kyiv_time()}\n\n"
             "💬 @K2P_S",
             reply_markup=main_menu_keyboard()
         )
@@ -313,9 +328,6 @@ async def menu_info(message: Message):
 
 @dp.message(F.text == "🔥 Канал")
 async def menu_channel(message: Message):
-    # Завантаж фото на imgur.com і вставляй URL
-    photo_url = "https://i.imgur.com/YOUR_IMAGE.jpg"  # ЗМІНИ НА СВОЄ ФОТО!
-    
     caption = (
         "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
         "💸 <b>Що всередині:</b>\n"
@@ -331,16 +343,7 @@ async def menu_channel(message: Message):
         "💬 Питання: @K2P_S"
     )
     
-    try:
-        await message.answer_photo(
-            photo=photo_url,
-            caption=caption,
-            reply_markup=main_menu_keyboard()
-        )
-    except Exception as e:
-        logger.error(f"Photo error: {e}")
-        # Якщо фото не завантажилось - відправляємо текст
-        await message.answer(caption, reply_markup=main_menu_keyboard())
+    await message.answer(caption, reply_markup=main_menu_keyboard())
 
 # Callbacks
 @dp.callback_query(F.data == "binance_menu")
@@ -349,7 +352,7 @@ async def cb_binance_menu(callback: CallbackQuery):
         "🔵 <b>Binance P2P Арбітраж</b>\n\n"
         "💰 Розраховуйте прибуток від купівлі та продажу USDT\n\n"
         "📊 Курси оновлюються в реальному часі\n"
-        "🏦 Фільтр: Monobank, від 5000 грн (2-й рядок)",
+        "🏦 Всі банки, від 5000 грн (2-й рядок)",
         reply_markup=binance_menu_kb()
     )
     await callback.answer()
@@ -381,11 +384,11 @@ async def cb_info(callback: CallbackQuery):
         spread_percent = (spread / rates["buy_rate"]) * 100
         
         await callback.message.answer(
-            f"ℹ️ <b>Binance P2P (Monobank, 2-й рядок):</b>\n\n"
-            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн\n"
-            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн\n\n"
+            f"ℹ️ <b>Binance P2P (всі банки, 2-й рядок):</b>\n\n"
+            f"🛒 Купівля: <b>{rates['buy_rate']:.2f}</b> грн ({rates.get('buy_bank', 'N/A')})\n"
+            f"💸 Продаж: <b>{rates['sell_rate']:.2f}</b> грн ({rates.get('sell_bank', 'N/A')})\n\n"
             f"📊 Спред: <b>{spread:.2f}</b> грн (<b>{spread_percent:.2f}%</b>)\n\n"
-            f"🕐 {datetime.now().strftime('%H:%M:%S')}\n\n"
+            f"🕐 {get_kyiv_time()}\n\n"
             "💬 @K2P_S"
         )
     else:
@@ -395,8 +398,6 @@ async def cb_info(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "channel")
 async def cb_channel(callback: CallbackQuery):
-    photo_url = "https://i.imgur.com/YOUR_IMAGE.jpg"  # ЗМІНИ НА СВОЄ ФОТО!
-    
     caption = (
         "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
         "💸 <b>Що всередині:</b>\n"
@@ -412,11 +413,7 @@ async def cb_channel(callback: CallbackQuery):
         "💬 Питання: @K2P_S"
     )
     
-    try:
-        await callback.message.answer_photo(photo=photo_url, caption=caption)
-    except Exception as e:
-        await callback.message.answer(caption)
-    
+    await callback.message.answer(caption)
     await callback.answer()
 
 @dp.callback_query(F.data == "history")
@@ -426,29 +423,46 @@ async def cb_history(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "refresh")
 async def cb_refresh(callback: CallbackQuery, state: FSMContext):
+    """ВИПРАВЛЕНО: тепер зберігаємо amount ГЛОБАЛЬНО"""
     try:
+        # Отримуємо дані
         data = await state.get_data()
         amount = data.get("amount")
         
+        # Якщо немає в state - перевіряємо в історії
         if not amount:
-            await callback.answer("❌ Дані втрачено")
+            user_id = callback.from_user.id
+            if user_id in user_history and user_history[user_id]:
+                amount = user_history[user_id][-1]["amount"]  # Остання сума
+        
+        if not amount:
+            await callback.answer("❌ Дані втрачено. Зробіть новий розрахунок.")
             return
         
+        # Отримуємо нові курси
         rates = await get_binance_rates()
         
         if not rates["success"]:
             await callback.answer(f"❌ {rates['error']}")
             return
         
+        # Розрахунок
         calc = calculate_arbitrage(amount, rates["buy_rate"], rates["sell_rate"])
+        
+        # Оновлюємо повідомлення
         await callback.message.edit_text(
             format_result(amount, rates, calc),
             reply_markup=action_kb()
         )
+        
+        # ЗБЕРІГАЄМО amount для наступного оновлення
+        await state.update_data(amount=amount)
+        
         await callback.answer("✅ Оновлено!")
+        logger.info(f"User {callback.from_user.id} refreshed: {amount} UAH")
         
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Refresh error: {e}")
         await callback.answer("❌ Помилка")
 
 @dp.callback_query(F.data == "new")
@@ -458,7 +472,7 @@ async def cb_new(callback: CallbackQuery, state: FSMContext):
         "🔵 <b>Binance P2P Арбітраж</b>\n\n"
         "💰 Розраховуйте прибуток від купівлі та продажу USDT\n\n"
         "📊 Курси оновлюються в реальному часі\n"
-        "🏦 Фільтр: Monobank, від 5000 грн (2-й рядок)",
+        "🏦 Всі банки, від 5000 грн (2-й рядок)",
         reply_markup=binance_menu_kb()
     )
     await callback.answer()
@@ -485,6 +499,7 @@ async def process_amount(message: Message, state: FSMContext):
             reply_markup=action_kb()
         )
         
+        # ЗБЕРІГАЄМО amount для кнопки "Оновити"
         await state.update_data(amount=amount)
         await state.clear()
         
