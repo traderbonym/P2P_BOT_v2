@@ -269,11 +269,31 @@ async def menu_info(message: Message):
 
 @dp.message(F.text == "🔥 Канал")
 async def menu_channel(message: Message):
-    await message.answer(
-        "📢 <b>Наш канал:</b>\n\n"
-        "🔥 https://t.me/P2P_CEH",
-        reply_markup=main_menu_keyboard()
+    caption = (
+        "🔥 <b>P2P CEH</b> — Канал про P2P та арбітраж !\n\n"
+        "💸 <b>Що всередині:</b>\n"
+        "├ Робочі схеми арбітражу\n"
+        "├ Прибуток 4-6% на угоду\n"
+        "├ Безпечні обмінники\n"
+        "└ Підтримка 24/7\n\n"
+        "📈 <b>Результати:</b>\n"
+        "• Середній прибуток: 4-6% на угоду\n"
+        "• Приєднуйтесь!</b>\n"
+        "👉 https://t.me/P2P_CEH\n\n"
+        "💬 Питання: @K2P_S"
     )
+    
+    await message.answer(caption, reply_markup=main_menu_keyboard())
+    
+    try:
+        await message.answer_photo(
+            photo=photo_url,
+            caption=caption,
+            reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        # Якщо фото не завантажилось - відправляємо текст
+        await message.answer(caption, reply_markup=main_menu_keyboard())
 
 # Callbacks
 @dp.callback_query(F.data == "binance_menu")
