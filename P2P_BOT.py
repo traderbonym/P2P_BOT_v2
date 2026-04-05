@@ -32,6 +32,7 @@ user_history = {}
 KYIV_TZ = timezone(timedelta(hours=2))
 
 def get_kyiv_time():
+    """Повертає поточний час у Києві (формат: 21:43)"""
     return datetime.now(KYIV_TZ).strftime("%H:%M")
 
 # FSM States
@@ -131,7 +132,7 @@ async def get_binance_top5():
             buy = buy_filtered[i]
             sell = sell_filtered[i]
             
-            # ВИПРАВЛЕНА ФОРМУЛА: продаж - купівля
+            # ПРАВИЛЬНА ФОРМУЛА: продаж - купівля
             spread = sell["price"] - buy["price"]
             
             top5.append({
@@ -174,8 +175,6 @@ def format_top5(amount, data):
         spread_percent = item["spread_percent"]
         
         # Розрахунок прибутку
-        # Купуємо USDT по buy_price, продаємо по sell_price
-        # Прибуток = (sell_price - buy_price) * кількість USDT
         usdt = amount / buy_price
         profit = usdt * spread
         
@@ -273,17 +272,18 @@ def action_kb():
 async def cmd_start(message: Message):
     await message.answer(
         f"👋 Вітаю, <b>{message.from_user.first_name}</b>!\n\n"
-        "🤖 Я бот для розрахунку <b>Market Making</b> на Binance P2P.\n\n"
-        "💰 <b>Що я показую:</b>\n"
-        "• ТОП-5 спредів (рядки 2-6)\n"
-        "• Прибуток для кожного рядка\n"
-        "• Порівняння курсів купівлі/продажу\n"
-        "• Ліміти для кожного оголошення\n\n"
-        "📱 Оберіть біржу:",
+        "🤖 <b>Binance P2P Калькулятор</b>\n\n"
+        "💸 Розраховуй прибуток від арбітражу за секунди!\n\n"
+        "📊 <b>Що всередині:</b>\n"
+        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
+        "✅ Курси купівлі/продажу USDT в реальному часі\n"
+        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
+        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
+        "🚀 Обирай біржу нижче!",
         reply_markup=main_menu_keyboard()
     )
     await message.answer(
-        "💡 <b>Або використовуйте кнопки нижче:</b>",
+        "💡 <b>Або використовуй інлайн кнопки:</b>",
         reply_markup=inline_kb()
     )
     logger.info(f"Користувач {message.from_user.id} запустив бота")
@@ -364,13 +364,24 @@ async def menu_info(message: Message):
 @dp.message(F.text == "🔥 Канал")
 async def menu_channel(message: Message):
     caption = (
+        "🚀 <b>Binance P2P за 2 секунди!</b>\n\n"
+        "<b>Що всередині:</b>\n"
+        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
+        "✅ Курси купівлі/продажу USDT в реальному часі\n"
+        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
+        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
+        "Безкоштовно! Без реєстрації! Без підписок!\n\n"
         "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
-        "💸 <b>Що всередині:</b>\n"
+        "💸 <b>Що на каналі:</b>\n"
         "├ Робочі схеми Market Making\n"
         "├ Прибуток 4-6% на угоду\n"
         "├ Безпечні стратегії\n"
         "└ Підтримка 24/7\n\n"
-        "🚀 Долучайся до команди: https://t.me/P2P_CEH\n"
+        "📈 <b>Статистика:</b>\n"
+        "• 1000+ учасників\n"
+        "• 50+ схем щомісяця\n"
+        "• 95% успішних угод\n\n"
+        "🚀 Приєднуйся: https://t.me/P2P_CEH\n"
         "💬 Питання: @K2P_S"
     )
     
@@ -429,8 +440,15 @@ async def cb_info(callback: CallbackQuery):
 @dp.callback_query(F.data == "channel")
 async def cb_channel(callback: CallbackQuery):
     caption = (
+        "🚀 <b>Binance P2P за 2 секунди!</b>\n\n"
+        "<b>Що всередині:</b>\n"
+        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
+        "✅ Курси купівлі/продажу USDT в реальному часі\n"
+        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
+        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
+        "Безкоштовно! Без реєстрації! Без підписок!\n\n"
         "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
-        "💸 <b>Що всередині:</b>\n"
+        "💸 <b>Що на каналі:</b>\n"
         "├ Робочі схеми Market Making\n"
         "├ Прибуток 4-6% на угоду\n"
         "├ Безпечні стратегії\n"
