@@ -28,11 +28,11 @@ dp = Dispatcher(storage=storage)
 session = None
 user_history = {}
 
-# Київський час (UTC+2)
-KYIV_TZ = timezone(timedelta(hours=2))
+# Київський час (UTC+3)
+KYIV_TZ = timezone(timedelta(hours=3))
 
 def get_kyiv_time():
-    """Повертає поточний час у Києві (формат: 21:43)"""
+    """Повертає поточний час у Києві (формат: 22:28)"""
     return datetime.now(KYIV_TZ).strftime("%H:%M")
 
 # FSM States
