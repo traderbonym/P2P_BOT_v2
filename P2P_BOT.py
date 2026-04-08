@@ -28,8 +28,8 @@ dp = Dispatcher(storage=storage)
 session = None
 user_history = {}
 
-# Київський час (UTC+3)
-KYIV_TZ = timezone(timedelta(hours=3))
+# Київський час (UTC+2, зима | UTC+3, літо)
+KYIV_TZ = timezone(timedelta(hours=2))
 
 def get_kyiv_time():
     """Повертає поточний час у Києві (формат: 22:28)"""
@@ -39,9 +39,46 @@ def get_kyiv_time():
 class CalculateState(StatesGroup):
     waiting_for_amount = State()
 
-# Get Binance P2P TOP-5 spreads
-async def get_binance_top5():
-    """Отримання спредів Binance P2P (всі банки, максимум >= 1000 грн)"""
+# СПИСОК КАРТКОВИХ МЕТОДІВ (виключаємо IBAN)
+CARD_METHODS = [
+    "Monobank",
+    "ПриватБанк",
+    "ПУМБ",
+    "Sense",
+    "А-Банк",
+    "Ощадбанк",
+    "Raiffeisen",
+    "Universal Bank",
+    "Ukrsibbank",
+    "OTP Bank",
+    "Sportbank",
+    "Credit Agricole",
+    "TAScombank",
+    "Bank transfer"  # Якщо це картка
+]
+
+def is_card_payment(bank_name):
+    """Перевірка чи це картковий платіж"""
+    bank_lower = bank_name.lower()
+    
+    # Виключаємо IBAN
+    if "iban" in bank_lower or "iban transfer" in bank_lower:
+        return False
+    
+    # Включаємо всі банки з картками
+    for card_method in CARD_METHODS:
+        if card_method.lower() in bank_lower:
+            return True
+    
+    # Якщо містить "bank" але не "iban" — ймовірно картка
+    if "bank" in bank_lower:
+        return True
+    
+    return False
+
+# Get Binance P2P best spread
+async def get_binance_best_spread():
+    """Отримання кращого спреду Binance P2P (тільки карткові платежі, від 1000 грн)"""
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         
@@ -60,7 +97,7 @@ async def get_binance_top5():
             if not buy_data.get("data"):
                 return {"success": False, "error": "Немає оголошень купівлі"}
             
-            # ФІЛЬТР: максимум >= 1000 грн
+            # ФІЛЬТР: тільки карткові платежі + максимум >= 1000 грн
             buy_filtered = []
             for ad in buy_data["data"]:
                 try:
@@ -69,21 +106,25 @@ async def get_binance_top5():
                     
                     if max_amount >= 1000:
                         methods = ad["adv"].get("tradeMethods", [])
-                        bank_name = methods[0]["tradeMethodName"] if methods else "N/A"
-                        
-                        buy_filtered.append({
-                            "price": float(ad["adv"]["price"]),
-                            "bank": bank_name,
-                            "min": min_amount,
-                            "max": max_amount
-                        })
+                        if methods:
+                            bank_name = methods[0]["tradeMethodName"]
+                            
+                            # Перевірка чи це картка
+                            if is_card_payment(bank_name):
+                                buy_filtered.append({
+                                    "price": float(ad["adv"]["price"]),
+                                    "bank": bank_name,
+                                    "min": min_amount,
+                                    "max": max_amount
+                                })
                 except Exception as e:
+                    logger.error(f"Помилка обробки BUY оголошення: {e}")
                     continue
             
             if len(buy_filtered) < 2:
-                return {"success": False, "error": f"Недостатньо оголошень купівлі (знайдено {len(buy_filtered)})"}
+                return {"success": False, "error": f"Недостатньо карткових оголошень купівлі (знайдено {len(buy_filtered)})"}
             
-            logger.info(f"Знайдено {len(buy_filtered)} оголошень купівлі (макс >= 1000 грн)")
+            logger.info(f"Знайдено {len(buy_filtered)} карткових оголошень купівлі")
         
         # ПРОДАЖ (SELL) - по цій ціні продаємо USDT
         sell_payload = {
@@ -108,107 +149,110 @@ async def get_binance_top5():
                     
                     if max_amount >= 1000:
                         methods = ad["adv"].get("tradeMethods", [])
-                        bank_name = methods[0]["tradeMethodName"] if methods else "N/A"
-                        
-                        sell_filtered.append({
-                            "price": float(ad["adv"]["price"]),
-                            "bank": bank_name,
-                            "min": min_amount,
-                            "max": max_amount
-                        })
+                        if methods:
+                            bank_name = methods[0]["tradeMethodName"]
+                            
+                            # Перевірка чи це картка
+                            if is_card_payment(bank_name):
+                                sell_filtered.append({
+                                    "price": float(ad["adv"]["price"]),
+                                    "bank": bank_name,
+                                    "min": min_amount,
+                                    "max": max_amount
+                                })
                 except Exception as e:
+                    logger.error(f"Помилка обробки SELL оголошення: {e}")
                     continue
             
             if len(sell_filtered) < 2:
-                return {"success": False, "error": f"Недостатньо оголошень продажу (знайдено {len(sell_filtered)})"}
+                return {"success": False, "error": f"Недостатньо карткових оголошень продажу (знайдено {len(sell_filtered)})"}
             
-            logger.info(f"Знайдено {len(sell_filtered)} оголошень продажу (макс >= 1000 грн)")
+            logger.info(f"Знайдено {len(sell_filtered)} карткових оголошень продажу")
         
-        # Створюємо ТОП-5 спредів (рядки 2-6 = індекси 1-5)
-        max_rows = min(5, len(buy_filtered) - 1, len(sell_filtered) - 1)
+        # Беремо 2-й рядок (індекс 1) для кращого спреду
+        buy = buy_filtered[1]
+        sell = sell_filtered[1]
         
-        top5 = []
-        for i in range(1, max_rows + 1):
-            buy = buy_filtered[i]
-            sell = sell_filtered[i]
-            
-            # ПРАВИЛЬНА ФОРМУЛА: продаж - купівля
-            spread = sell["price"] - buy["price"]
-            
-            top5.append({
-                "row": i + 1,
-                "buy_price": buy["price"],
-                "buy_bank": buy["bank"],
-                "buy_min": buy["min"],
-                "buy_max": buy["max"],
-                "sell_price": sell["price"],
-                "sell_bank": sell["bank"],
-                "sell_min": sell["min"],
-                "sell_max": sell["max"],
-                "spread": spread,
-                "spread_percent": (spread / buy["price"]) * 100
-            })
-            
-            logger.info(f"Рядок {i+1}: SELL {sell['price']:.2f} - BUY {buy['price']:.2f} = СПРЕД {spread:.2f}")
+        # ПРАВИЛЬНА ФОРМУЛА: продаж - купівля
+        spread = sell["price"] - buy["price"]
+        
+        logger.info(f"Кращий спред: SELL {sell['price']:.2f} - BUY {buy['price']:.2f} = {spread:.2f}")
         
         return {
             "success": True,
-            "top5": top5
+            "buy_price": buy["price"],
+            "buy_bank": buy["bank"],
+            "buy_min": buy["min"],
+            "buy_max": buy["max"],
+            "sell_price": sell["price"],
+            "sell_bank": sell["bank"],
+            "sell_min": sell["min"],
+            "sell_max": sell["max"],
+            "spread": spread,
+            "spread_percent": (spread / buy["price"]) * 100
         }
         
     except Exception as e:
         logger.error(f"Помилка: {e}")
         return {"success": False, "error": str(e)}
 
-# Format TOP-5 spreads
-def format_top5(amount, data):
-    """Форматування спредів"""
+# Format result
+def format_result(amount, data):
+    """Форматування результату"""
     
-    text = f"📊 <b>ТОП-{len(data['top5'])} СПРЕДІВ BINANCE P2P</b>\n"
-    text += f"💰 Сума: <b>{amount:,.0f} грн</b>\n\n"
+    buy_price = data["buy_price"]
+    sell_price = data["sell_price"]
+    spread = data["spread"]
+    spread_percent = data["spread_percent"]
     
-    for item in data["top5"]:
-        row_num = item["row"]
-        buy_price = item["buy_price"]
-        sell_price = item["sell_price"]
-        spread = item["spread"]
-        spread_percent = item["spread_percent"]
-        
-        # Розрахунок прибутку
-        usdt = amount / buy_price
-        profit = usdt * spread
-        
-        # Емодзі
-        if spread > 0:
-            emoji = "🟢"
-        elif spread < 0:
-            emoji = "🔴"
-        else:
-            emoji = "🟡"
-        
-        text += f"<b>{row_num}️⃣ РЯДОК:</b>\n"
-        text += f"├ 🟦 КУПІВЛЯ USDT: <b>{buy_price:.2f}</b> грн\n"
-        text += f"│  └ {item['buy_bank']} ({item['buy_min']:,.0f}-{item['buy_max']:,.0f} грн)\n"
-        text += f"├ 🟩 ПРОДАЖ USDT: <b>{sell_price:.2f}</b> грн\n"
-        text += f"│  └ {item['sell_bank']} ({item['sell_min']:,.0f}-{item['sell_max']:,.0f} грн)\n"
-        text += f"└ {emoji} Спред: <b>{spread:.2f}</b> грн ({spread_percent:.2f}%) = Прибуток: <b>{profit:.2f}</b> грн\n\n"
+    # Розрахунок прибутку
+    usdt = amount / buy_price
+    profit = usdt * spread
+    
+    # Емодзі
+    if spread > 0:
+        emoji = "🟢"
+    elif spread < 0:
+        emoji = "🔴"
+    else:
+        emoji = "🟡"
+    
+    text = f"💰 <b>РОЗРАХУНОК ДЛЯ {amount:,.0f} ГРН</b>\n\n"
+    
+    text += f"<b>📊 ВАША СХЕМА:</b>\n\n"
+    
+    text += f"1️⃣ <b>КУПУЄШ USDT</b>\n"
+    text += f"├ Ціна: <b>{buy_price:.2f}</b> грн\n"
+    text += f"├ Банк: {data['buy_bank']}\n"
+    text += f"├ Витрачаєш: <b>{amount:,.0f}</b> грн\n"
+    text += f"└ Отримуєш: <b>{usdt:.2f}</b> USDT\n\n"
+    
+    text += f"2️⃣ <b>ПРОДАЄШ USDT</b>\n"
+    text += f"├ Ціна: <b>{sell_price:.2f}</b> грн\n"
+    text += f"├ Банк: {data['sell_bank']}\n"
+    text += f"├ Продаєш: <b>{usdt:.2f}</b> USDT\n"
+    text += f"└ Отримуєш: <b>{usdt * sell_price:,.2f}</b> грн\n\n"
+    
+    text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    text += f"{emoji} <b>ТВІЙ ПРИБУТОК:</b>\n"
+    text += f"├ Спред: <b>{spread:.2f}</b> грн ({spread_percent:.2f}%)\n"
+    text += f"└ Прибуток: <b>+{profit:.2f}</b> грн 🔥\n\n"
     
     text += f"💡 <b>Як працює:</b>\n"
-    text += f"1. Створюєш ордер на КУПІВЛЮ USDT по ціні з 2-го стовпця\n"
-    text += f"2. Створюєш ордер на ПРОДАЖ USDT по ціні з 1-го стовпця\n"
-    text += f"3. Отримуєш спред як прибуток!\n\n"
-    text += f"🕐 {get_kyiv_time()}"
+    text += f"Купуєш дешевше → Продаєш дорожче → Профіт!\n\n"
+    
+    text += f"🕐 Оновлено: {get_kyiv_time()} (Київ)"
     
     return text
 
 # History
-def add_to_history(user_id, amount, row, profit, percent):
+def add_to_history(user_id, amount, profit, percent):
     if user_id not in user_history:
         user_history[user_id] = []
     
     user_history[user_id].append({
         "amount": amount,
-        "row": row,
         "profit": profit,
         "percent": percent,
         "time": get_kyiv_time()
@@ -225,7 +269,7 @@ def format_history(user_id):
     
     for i, record in enumerate(reversed(user_history[user_id]), 1):
         emoji = "🟢" if record["profit"] > 0 else "🔴" if record["profit"] < 0 else "🟡"
-        text += f"{i}. {record['time']} | Рядок {record['row']} | {record['amount']:,.0f} грн → {emoji} {record['profit']:,.2f} грн\n"
+        text += f"{i}. {record['time']} | {record['amount']:,.0f} грн → {emoji} +{record['profit']:,.2f} грн ({record['percent']:.2f}%)\n"
     
     return text
 
@@ -234,7 +278,10 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="🔵 Binance P2P"),
+                KeyboardButton(text="💰 Розрахувати прибуток"),
+            ],
+            [
+                KeyboardButton(text="📜 Історія"),
                 KeyboardButton(text="ℹ️ Інфо")
             ],
             [
@@ -245,26 +292,12 @@ def main_menu_keyboard():
         input_field_placeholder="Оберіть дію..."
     )
 
-def inline_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔵 Binance P2P", callback_data="binance_menu")],
-        [InlineKeyboardButton(text="🔥 Канал", callback_data="channel")],
-        [InlineKeyboardButton(text="ℹ️ Інфо", callback_data="info")]
-    ])
-
-def binance_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 ТОП-5 спредів", callback_data="calculate")],
-        [InlineKeyboardButton(text="📊 Купити USDT", url="https://p2p.binance.com/trade/all-payments/USDT?fiat=UAH")],
-        [InlineKeyboardButton(text="💸 Продати USDT", url="https://p2p.binance.com/trade/sell/USDT?fiat=UAH&payment=all-payments")],
-        [InlineKeyboardButton(text="📜 Історія", callback_data="history")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")]
-    ])
-
 def action_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Оновити", callback_data="refresh")],
-        [InlineKeyboardButton(text="🆕 Новий розрахунок", callback_data="new")]
+        [InlineKeyboardButton(text="🆕 Новий розрахунок", callback_data="new")],
+        [InlineKeyboardButton(text="📊 Купити USDT", url="https://p2p.binance.com/trade/all-payments/USDT?fiat=UAH")],
+        [InlineKeyboardButton(text="💸 Продати USDT", url="https://p2p.binance.com/trade/sell/USDT?fiat=UAH&payment=all-payments")]
     ])
 
 # Commands
@@ -273,18 +306,18 @@ async def cmd_start(message: Message):
     await message.answer(
         f"👋 Вітаю, <b>{message.from_user.first_name}</b>!\n\n"
         "🤖 <b>Binance P2P Калькулятор</b>\n\n"
-        "💸 Розраховуй прибуток від арбітражу за секунди!\n\n"
-        "📊 <b>Що всередині:</b>\n"
-        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
-        "✅ Курси купівлі/продажу USDT в реальному часі\n"
-        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
-        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
-        "🚀 Обирай біржу нижче!",
+        "💸 Розраховуй прибуток від P2P арбітражу за секунди!\n\n"
+        "📊 <b>Що я вмію:</b>\n"
+        "✅ Знаходжу кращий спред на Binance P2P\n"
+        "✅ Розраховую твій прибуток\n"
+        "✅ Показую курси купівлі/продажу USDT\n"
+        "✅ Працюю тільки з картковими платежами\n\n"
+        "💡 <b>Як користуватись:</b>\n"
+        "1. Натисни \"💰 Розрахувати прибуток\"\n"
+        "2. Введи суму (від 1000 грн)\n"
+        "3. Отримай розрахунок!\n\n"
+        "🚀 Почнемо!",
         reply_markup=main_menu_keyboard()
-    )
-    await message.answer(
-        "💡 <b>Або використовуй інлайн кнопки:</b>",
-        reply_markup=inline_kb()
     )
     logger.info(f"Користувач {message.from_user.id} запустив бота")
 
@@ -292,29 +325,34 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await message.answer(
         "📚 <b>Довідка:</b>\n\n"
-        "1️⃣ Оберіть Binance P2P\n"
-        "2️⃣ Введіть суму (від 1000 грн)\n"
-        "3️⃣ Отримайте ТОП-5 спредів\n\n"
-        "🏦 Всі банки, максимум >= 1000 грн\n\n"
-        "💡 <b>Формула спреду:</b>\n"
-        "Спред = Ціна продажу - Ціна купівлі\n\n"
+        "1️⃣ Натисни \"💰 Розрахувати прибуток\"\n"
+        "2️⃣ Введи суму в гривнях (мінімум 1000)\n"
+        "3️⃣ Отримай розрахунок прибутку\n\n"
+        "🏦 <b>Фільтри:</b>\n"
+        "✅ Тільки карткові платежі (без IBAN)\n"
+        "✅ Тільки верифіковані мерчанти\n"
+        "✅ Максимум угоди >= 1000 грн\n\n"
+        "💡 <b>Формула:</b>\n"
+        "Прибуток = (Ціна продажу - Ціна купівлі) × Кількість USDT\n\n"
         "💬 Підтримка: @K2P_S",
         reply_markup=main_menu_keyboard()
     )
 
 @dp.message(Command("info"))
 async def cmd_info(message: Message):
-    data = await get_binance_top5()
+    data = await get_binance_best_spread()
     
     if data["success"]:
-        best = data["top5"][0]
-        
         await message.answer(
-            f"ℹ️ <b>Binance P2P (Кращий спред - {best['row']}-й рядок):</b>\n\n"
-            f"🟦 Купівля: <b>{best['buy_price']:.2f}</b> грн\n"
-            f"🟩 Продаж: <b>{best['sell_price']:.2f}</b> грн\n\n"
-            f"📊 Спред: <b>{best['spread']:.2f}</b> грн (<b>{best['spread_percent']:.2f}%</b>)\n\n"
-            f"🕐 {get_kyiv_time()}\n\n"
+            f"ℹ️ <b>Поточні курси Binance P2P:</b>\n\n"
+            f"🟦 Купівля USDT: <b>{data['buy_price']:.2f}</b> грн\n"
+            f"├ Банк: {data['buy_bank']}\n"
+            f"└ Ліміт: {data['buy_min']:,.0f}-{data['buy_max']:,.0f} грн\n\n"
+            f"🟩 Продаж USDT: <b>{data['sell_price']:.2f}</b> грн\n"
+            f"├ Банк: {data['sell_bank']}\n"
+            f"└ Ліміт: {data['sell_min']:,.0f}-{data['sell_max']:,.0f} грн\n\n"
+            f"📊 Спред: <b>{data['spread']:.2f}</b> грн (<b>{data['spread_percent']:.2f}%</b>)\n\n"
+            f"🕐 {get_kyiv_time()} (Київ)\n\n"
             "💬 @K2P_S",
             reply_markup=main_menu_keyboard()
         )
@@ -332,29 +370,34 @@ async def cmd_clear(message: Message):
     await message.answer("🗑 <b>Історію очищено!</b>", reply_markup=main_menu_keyboard())
 
 # Menu buttons
-@dp.message(F.text == "🔵 Binance P2P")
-async def menu_binance(message: Message):
+@dp.message(F.text == "💰 Розрахувати прибуток")
+async def menu_calculate(message: Message, state: FSMContext):
     await message.answer(
-        "🔵 <b>Binance P2P Market Making</b>\n\n"
-        "💰 ТОП-5 спредів (рядки 2-6)\n"
-        "📊 Порівняння курсів купівлі/продажу\n"
-        "🏦 Всі банки, від 1000 грн",
-        reply_markup=binance_menu_kb()
+        "💰 <b>Розрахунок прибутку P2P арбітраж</b>\n\n"
+        "Введи суму в <b>гривнях</b> (мінімум 1000):\n\n"
+        "💡 Приклад: <code>1000</code> або <code>5000</code>"
     )
+    await state.set_state(CalculateState.waiting_for_amount)
+
+@dp.message(F.text == "📜 Історія")
+async def menu_history(message: Message):
+    await message.answer(format_history(message.from_user.id), reply_markup=main_menu_keyboard())
 
 @dp.message(F.text == "ℹ️ Інфо")
 async def menu_info(message: Message):
-    data = await get_binance_top5()
+    data = await get_binance_best_spread()
     
     if data["success"]:
-        best = data["top5"][0]
-        
         await message.answer(
-            f"ℹ️ <b>Binance P2P (Кращий спред - {best['row']}-й рядок):</b>\n\n"
-            f"🟦 Купівля: <b>{best['buy_price']:.2f}</b> грн\n"
-            f"🟩 Продаж: <b>{best['sell_price']:.2f}</b> грн\n\n"
-            f"📊 Спред: <b>{best['spread']:.2f}</b> грн (<b>{best['spread_percent']:.2f}%</b>)\n\n"
-            f"🕐 {get_kyiv_time()}\n\n"
+            f"ℹ️ <b>Поточні курси Binance P2P:</b>\n\n"
+            f"🟦 Купівля USDT: <b>{data['buy_price']:.2f}</b> грн\n"
+            f"├ Банк: {data['buy_bank']}\n"
+            f"└ Ліміт: {data['buy_min']:,.0f}-{data['buy_max']:,.0f} грн\n\n"
+            f"🟩 Продаж USDT: <b>{data['sell_price']:.2f}</b> грн\n"
+            f"├ Банк: {data['sell_bank']}\n"
+            f"└ Ліміт: {data['sell_min']:,.0f}-{data['sell_max']:,.0f} грн\n\n"
+            f"📊 Спред: <b>{data['spread']:.2f}</b> грн (<b>{data['spread_percent']:.2f}%</b>)\n\n"
+            f"🕐 {get_kyiv_time()} (Київ)\n\n"
             "💬 @K2P_S",
             reply_markup=main_menu_keyboard()
         )
@@ -364,103 +407,23 @@ async def menu_info(message: Message):
 @dp.message(F.text == "🔥 Канал")
 async def menu_channel(message: Message):
     caption = (
-        "🚀 <b>Binance P2P за 2 секунди!</b>\n\n"
-        "<b>Що всередині:</b>\n"
-        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
-        "✅ Курси купівлі/продажу USDT в реальному часі\n"
-        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
-        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
-        "Безкоштовно! Без реєстрації! Без підписок!\n\n"
-        "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
-        "💸 <b>Що на каналі:</b>\n"
-        "├ Робочі схеми (з пруфами)\n"
-        "├ Прибуток 3-6% на угоду\n"
-        "├ Безпечні стратегії\n"
-        "└ Підтримка 24/7\n\n"
-        "🚀 Приєднуйся: https://t.me/P2P_CEH\n"
+        "🚀 <b>P2P CEH — Заробіток на арбітражі!</b>\n\n"
+        "<b>Що на каналі:</b>\n"
+        "✅ Робочі схеми P2P арбітражу\n"
+        "✅ Кейси з реальними прибутками\n"
+        "✅ Навчання для новачків\n"
+        "✅ Безкоштовний калькулятор\n"
+        "✅ Підтримка 24/7\n\n"
+        "💰 <b>Прибуток:</b> 3-6% на угоду\n"
+        "⏰ <b>Час:</b> 10-15 хвилин на угоду\n"
+        "💵 <b>Старт:</b> від 1000 грн\n\n"
+        "🔥 Приєднуйся: https://t.me/P2P_CEH\n"
         "💬 Питання: @K2P_S"
     )
     
     await message.answer(caption, reply_markup=main_menu_keyboard())
 
 # Callbacks
-@dp.callback_query(F.data == "binance_menu")
-async def cb_binance_menu(callback: CallbackQuery):
-    await callback.message.answer(
-        "🔵 <b>Binance P2P Market Making</b>\n\n"
-        "💰 ТОП-5 спредів (рядки 2-6)\n"
-        "📊 Порівняння курсів купівлі/продажу\n"
-        "🏦 Всі банки, від 1000 грн",
-        reply_markup=binance_menu_kb()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "back_main")
-async def cb_back_main(callback: CallbackQuery):
-    await callback.message.answer(
-        "💡 <b>Головне меню:</b>",
-        reply_markup=inline_kb()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "calculate")
-async def cb_calculate(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "💰 <b>ТОП-5 спредів Binance P2P</b>\n\n"
-        "Введіть суму в <b>гривнях</b> (мін. 1000):\n\n"
-        "💡 Приклад: <code>1000</code> або <code>5000</code>"
-    )
-    await state.set_state(CalculateState.waiting_for_amount)
-    await callback.answer()
-
-@dp.callback_query(F.data == "info")
-async def cb_info(callback: CallbackQuery):
-    data = await get_binance_top5()
-    
-    if data["success"]:
-        best = data["top5"][0]
-        
-        await callback.message.answer(
-            f"ℹ️ <b>Binance P2P (Кращий спред - {best['row']}-й рядок):</b>\n\n"
-            f"🟦 Купівля: <b>{best['buy_price']:.2f}</b> грн\n"
-            f"🟩 Продаж: <b>{best['sell_price']:.2f}</b> грн\n\n"
-            f"📊 Спред: <b>{best['spread']:.2f}</b> грн (<b>{best['spread_percent']:.2f}%</b>)\n\n"
-            f"🕐 {get_kyiv_time()}\n\n"
-            "💬 @K2P_S"
-        )
-    else:
-        await callback.message.answer(f"❌ Помилка: {data['error']}")
-    
-    await callback.answer()
-
-@dp.callback_query(F.data == "channel")
-async def cb_channel(callback: CallbackQuery):
-    caption = (
-        "🚀 <b>Binance P2P за 2 секунди!</b>\n\n"
-        "<b>Що всередині:</b>\n"
-        "✅ ТОП-5 найкращих спредів на Binance P2P\n"
-        "✅ Курси купівлі/продажу USDT в реальному часі\n"
-        "✅ Розрахунок прибутку для будь-якої суми (від 1000 грн)\n"
-        "✅ Всі банки України (Monobank, ПриватBank, А-Bank)\n\n"
-        "Безкоштовно! Без реєстрації! Без підписок!\n\n"
-        "🔥 <b>P2P CEH</b> — твій шлях до пасивного доходу!\n\n"
-        "💸 <b>Що на каналі:</b>\n"
-        "├ Робочі схеми (з пруфами)\n"
-        "├ Прибуток 3-6% на угоду\n"
-        "├ Безпечні стратегії\n"
-        "└ Підтримка 24/7\n\n"
-        "🚀 Приєднуйся: https://t.me/P2P_CEH\n"
-        "💬 Питання: @K2P_S"
-    )
-    
-    await callback.message.answer(caption)
-    await callback.answer()
-
-@dp.callback_query(F.data == "history")
-async def cb_history(callback: CallbackQuery):
-    await callback.message.answer(format_history(callback.from_user.id))
-    await callback.answer()
-
 @dp.callback_query(F.data == "refresh")
 async def cb_refresh(callback: CallbackQuery, state: FSMContext):
     try:
@@ -473,16 +436,16 @@ async def cb_refresh(callback: CallbackQuery, state: FSMContext):
                 amount = user_history[user_id][-1]["amount"]
         
         if not amount:
-            await callback.answer("❌ Введіть нову суму")
+            await callback.answer("❌ Введи нову суму")
             return
         
-        result = await get_binance_top5()
+        result = await get_binance_best_spread()
         
         if not result["success"]:
             await callback.answer(f"❌ {result['error']}")
             return
         
-        new_text = format_top5(amount, result)
+        new_text = format_result(amount, result)
         
         try:
             await callback.message.edit_text(
@@ -502,12 +465,11 @@ async def cb_refresh(callback: CallbackQuery, state: FSMContext):
 async def cb_new(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer(
-        "🔵 <b>Binance P2P Market Making</b>\n\n"
-        "💰 ТОП-5 спредів (рядки 2-6)\n"
-        "📊 Порівняння курсів купівлі/продажу\n"
-        "🏦 Всі банки, від 1000 грн",
-        reply_markup=binance_menu_kb()
+        "💰 <b>Розрахунок прибутку P2P арбітраж</b>\n\n"
+        "Введи суму в <b>гривнях</b> (мінімум 1000):\n\n"
+        "💡 Приклад: <code>1000</code> або <code>5000</code>"
     )
+    await state.set_state(CalculateState.waiting_for_amount)
     await callback.answer()
 
 # Amount handler
@@ -519,31 +481,31 @@ async def process_amount(message: Message, state: FSMContext):
         if amount < 1000:
             return await message.answer("❌ Мінімум: <b>1000 грн</b>")
         
-        result = await get_binance_top5()
+        result = await get_binance_best_spread()
         
         if not result["success"]:
             return await message.answer(f"❌ Помилка: {result['error']}")
         
-        # Додаємо в історію (кращий спред)
-        best = result["top5"][0]
-        usdt = amount / best["buy_price"]
-        profit = usdt * best["spread"]
+        # Розрахунок прибутку
+        usdt = amount / result["buy_price"]
+        profit = usdt * result["spread"]
         profit_percent = (profit / amount) * 100
         
-        add_to_history(message.from_user.id, amount, best["row"], profit, profit_percent)
+        # Додаємо в історію
+        add_to_history(message.from_user.id, amount, profit, profit_percent)
         
         await message.answer(
-            format_top5(amount, result),
+            format_result(amount, result),
             reply_markup=action_kb()
         )
         
         await state.update_data(amount=amount)
         await state.clear()
         
-        logger.info(f"Користувач {message.from_user.id}: {amount} грн -> ТОП-{len(result['top5'])} показано")
+        logger.info(f"Користувач {message.from_user.id}: {amount} грн -> прибуток {profit:.2f} грн")
         
     except ValueError:
-        await message.answer("❌ Введіть число!\n\n💡 Приклад: <code>1000</code>")
+        await message.answer("❌ Введи число!\n\n💡 Приклад: <code>1000</code>")
 
 # Main
 if __name__ == "__main__":
@@ -570,7 +532,7 @@ if __name__ == "__main__":
         await site.start()
         
         logger.info(f"HTTP сервер на порту {port}")
-        logger.info("P2P Market Making Бот запущено!")
+        logger.info("P2P Калькулятор запущено!")
         
         me = await bot.get_me()
         logger.info(f"@{me.username}")
